@@ -2,7 +2,8 @@
 from datetime import datetime
 import os
 import urllib
-from flask import Flask, abort, request, session, redirect, render_template
+from flask import Flask, abort, request, session, redirect, render_template, jsonify
+from flask_cors import CORS
 import requests
 import requests.auth
 from dotenv import load_dotenv
@@ -134,6 +135,7 @@ OUTPUTS:
 
 # -------------------------app REDIRECTS --------------------------- #
 app = Flask(__name__)
+CORS(app)
 
 
 # Need to use session variables which help us carry values of different webpages
@@ -142,12 +144,13 @@ app.secret_key = gen_secret_key()
 
 @app.route('/', methods=["GET", "POST"])
 def app_homepage():
-    return render_template('login.html')
+    return jsonify({"message": "Welcome. Please authenticate via /get_auth."})
 
 
 @app.route('/get_auth', methods=["POST"])
 def app_auth():
-    return redirect(make_authorization_url())
+    url = make_authorization_url()
+    return jsonify({"auth_url": url})
 
 
 @app.route('/users/home', methods=['POST', 'GET'])
@@ -155,32 +158,37 @@ def app_callback():
     if request.method == "GET":
         if session.get('bool') is False:
             code = request.args.get('code')
+            if not code:
+                return jsonify({"error": "Missing authorization code."}), 400
             access_token, refresh_token, created_at = get_token(code)
             session['access_token'] = access_token
             session['refresh_token'] = refresh_token
             session['created_at'] = update_date(created_at)
             session['expires_at'] = update_expire(created_at)
             session['bool'] = True
-        html = render_template('home.html')
-        return html.format(
-            gen_token_disp(session.get('access_token')),
-            session.get('created_at'),
-            session['expires_at'],
-            gen_token_disp(session['refresh_token'])
-        )
+        return jsonify({
+            "access_token": gen_token_disp(session.get('access_token')),
+            "created_at": session.get('created_at'),
+            "expires_at": session['expires_at'],
+            "refresh_token": gen_token_disp(session['refresh_token'])
+        })
 
 
 @app.route('/users/me', methods=["GET"])
 def app_page_me():
-    [login, my_id] = get_me(session.get('access_token'))
-    html = render_template('me.html')
-    return html % (my_id, login)
+    access_token = session.get('access_token')
+    if not access_token:
+        return jsonify({"error": "Not authenticated."}), 401
+    login, my_id = get_me(access_token)
+    return jsonify({"id": my_id, "login": login})
 
 
 @app.route('/users/refreshtoken', methods=["POST"])
 def app_refresh_token():
     access_token = session.get('access_token')
     refresh_token = session.get('refresh_token')
+    if not access_token or not refresh_token:
+        return jsonify({"error": "No token to refresh."}), 401
     headers = {"Authorization": "Bearer " + access_token}
     data = {
         "client_id": CLIENT_ID,
@@ -188,23 +196,31 @@ def app_refresh_token():
         "redirect_uri": REDIRECT_URI,
         "client_secret": CLIENT_SECRET,
         "refresh_token": refresh_token
-        }
+    }
     response = requests.post(BASE_URL+'/oauth/token', data=data, headers=headers)
     response_json = response.json()
     session['access_token'] = response_json['access_token']
     session['refresh_token'] = response_json['refresh_token']
     session['created_at'] = update_date(response_json['created_at'])
     session['expires_at'] = update_expire(response_json['created_at'])
-    return redirect('/users/home')
+    return jsonify({
+        "access_token": gen_token_disp(session['access_token']),
+        "refresh_token": gen_token_disp(session['refresh_token']),
+        "created_at": session['created_at'],
+        "expires_at": session['expires_at']
+    })
 
 
 @app.route('/users/revoketoken', methods=['POST'])
 def app_revoke_token():
     access_token = session.get('access_token')
+    if not access_token:
+        return jsonify({"error": "No token to revoke."}), 401
     data = {
         "client_id": CLIENT_ID,
         "client_secret": CLIENT_SECRET,
         "token": access_token
-        }
+    }
     requests.post(BASE_URL+'/oauth/token', data=data)
-    return redirect('/')
+    session.clear()
+    return jsonify({"message": "Token revoked and session cleared."})
